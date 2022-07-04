@@ -3,7 +3,6 @@ package org.analyser;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
-import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuItem;
@@ -14,17 +13,19 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
+import org.analyser.transformers.BaseTransformer;
 import org.apache.commons.io.FileUtils;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.opencv.core.*;
 import org.opencv.imgcodecs.Imgcodecs;
-import org.opencv.imgproc.Imgproc;
 
 import java.io.*;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedList;
 import java.util.List;
 
 @FunctionalInterface
@@ -33,14 +34,16 @@ interface ImageProcess{
 }
 
 public class App extends Application {
+    private final ImageView iv_main = new ImageView();
+    private final HBox filter_results = new HBox();
+
+    private final BaseTransformer transformer = new BaseTransformer();
+
     private JSONObject config = new JSONObject();
-    private Mat mat_main = null;
-    private ImageView iv_main = new ImageView();
-    private HBox filter_results = new HBox();
     private String current_image = "";
-    private int nof_images = 0;
-    private int index_image = 0;
-    private int index_folder = 0;
+    private Workbook workbook = null;
+    private int row_number = 0;
+
 
     private Image mat_to_img(Mat mat){
         MatOfByte byteMat = new MatOfByte();
@@ -106,10 +109,12 @@ public class App extends Application {
         } catch (IOException e) {
             e.printStackTrace();
         }
+
+        transformer.load(config);
+        transformer.set_output(filter_results);
     }
 
     private void reload_images(){
-        nof_images = 0;
         current_image = "";
         JSONArray paths = (JSONArray)config.get("image_paths");
         if (paths == null){
@@ -119,7 +124,6 @@ public class App extends Application {
             if (current_image.equals("")) {
                 current_image = image.getAbsolutePath();
             }
-            nof_images++;
         };
         for (Object path :paths){
             File directory  = new File((String)path);
@@ -156,193 +160,6 @@ public class App extends Application {
         }
     }
 
-    private void display_result(String name, List<Mat> mats){
-        VBox images = new VBox();
-        for (Mat mat: mats){
-            ImageView imageView= new ImageView(mat_to_img(mat));
-            imageView.setFitHeight(200);
-            imageView.setFitWidth(200);
-            imageView.setPreserveRatio(true);
-            images.getChildren().add(imageView);
-        }
-
-        VBox group = new VBox();
-        group.getChildren().addAll(new Label(name), images);
-        filter_results.getChildren().add(new HBox(group));
-    }
-
-    private void store_result(File path, String posix, List<Mat> mats){
-        String name = path.getName();
-        int index = name.lastIndexOf(".");
-        String debug = path.getParent() + "\\debug_java\\" + name.substring(0, index) + posix;
-        File final_path = new File(debug);
-        final_path.getParentFile().mkdirs();
-        int counter = 0;
-        for (Mat mat: mats) {
-            String storage = debug + "_" + counter++ + ".png";
-            Imgcodecs.imwrite(storage, mat);
-        }
-    }
-
-    private List<Mat> process_converter(List<Mat> mats, JSONObject descr, File image){
-        List<Mat> results= new ArrayList<>();
-        String from = (String) descr.get("from");
-        String to = (String) descr.get("to");
-
-        int code = 0;
-        if (from.equals("BGR")) {
-            if (to.equals("HSV")) {
-                code = Imgproc.COLOR_BGR2HSV; // 40
-            }
-        }
-
-        for (Mat mat: mats){
-            Mat dist = new Mat();
-            Imgproc.cvtColor(mat, dist, code);
-            results.add(dist);
-        }
-        return results;
-    }
-
-    private List<Mat> process_mask(List<Mat> mats, JSONObject descr, File image){
-        List<Mat> results= new ArrayList<>();
-        JSONArray ja_upper = descr.getJSONArray("upper");
-        JSONArray ja_lower = descr.getJSONArray("lower");
-        Scalar upper = new Scalar(ja_upper.getDouble(0), ja_upper.getDouble(1), ja_upper.getDouble(2));
-        Scalar lower = new Scalar(ja_lower.getDouble(0), ja_lower.getDouble(1), ja_lower.getDouble(2));
-        JSONArray reports = new JSONArray();
-        for (Mat mat: mats) {
-            Mat mask = new Mat();
-            Core.inRange(mat, lower, upper, mask);
-            results.add(mask);
-            JSONObject report = new JSONObject();
-            int pixels = 0;
-            for (int y = 0; y < mask.cols(); y++) {
-                for (int x = 0; x < mask.rows(); x++) {
-                    if (mask.get(x, y)[0] == 255){
-                        pixels++;
-                    }
-                }
-            }
-            report.put("pixels", pixels);
-            reports.put(report);
-        }
-        descr.put("report", reports);
-        return results;
-    }
-
-    private List<Mat> process_ellipse(List<Mat> mats, JSONObject descr, File image){
-        List<Mat> results = new ArrayList<>();
-        List<Mat> masks = process_filter(mats, descr, image);
-        Mat hierarchy = new Mat();
-        Scalar color = new Scalar(255, 0, 0);
-        JSONArray reports = new JSONArray();
-        for (int i = 0; i < masks.size(); i++) {
-            List<MatOfPoint> contours = new ArrayList<>();
-            Imgproc.findContours(masks.get(i), contours, hierarchy, Imgproc.RETR_TREE, Imgproc.CHAIN_APPROX_SIMPLE);
-            // sort contours
-            // contours.sort((c1, c2) -> (int)(Imgproc.contourArea(c2) - Imgproc.contourArea(c1)));
-            // RotatedRect hull = Imgproc.fitEllipse(new MatOfPoint2f(contours.get(0).toArray()));
-            double maxVal = 0;
-            int maxValIdx = 0;
-            for (int contourIdx = 0; contourIdx < contours.size(); contourIdx++)
-            {
-                double contourArea = Imgproc.contourArea(contours.get(contourIdx));
-                if (maxVal < contourArea)
-                {
-                    maxVal = contourArea;
-                    maxValIdx = contourIdx;
-                }
-            }
-            RotatedRect hull = Imgproc.fitEllipse(new MatOfPoint2f(contours.get(maxValIdx).toArray()));
-            Mat img;
-            if (i >= mats.size()){
-                img = mats.get(0).clone();
-            }
-            else{
-                img = mats.get(i).clone();
-            }
-            Imgproc.ellipse(img, hull, color);
-            results.add(img);
-            JSONObject report = new JSONObject();
-            report.put("width", hull.size.width);
-            report.put("height", hull.size.height);
-            report.put("area", Math.PI * hull.size.height * hull.size.width);
-            reports.put(report);
-        }
-        descr.put("report", reports);
-        return results;
-    }
-
-    private List<Mat> process_optimisation(List<Mat> mats, JSONObject descr, File image){
-        List<Mat> candidates =  process_filter(mats, descr, image);
-        JSONArray filters = descr.getJSONArray("filters");
-        JSONObject last_filter = filters.getJSONObject(filters.length() - 1);
-        JSONArray last_filter_report = last_filter.getJSONArray("report");
-        double optimal_value = Math.abs(last_filter_report.getJSONObject(0).getDouble("width") - last_filter_report.getJSONObject(0).getDouble("height"));
-        int optimal_index = 0;
-        for (int i = 1; i < last_filter_report.length(); i++) {
-            JSONObject curr_report = last_filter_report.getJSONObject(i);
-            double value = Math.abs(curr_report.getDouble("width") - curr_report.getDouble("height"));
-            if (value < optimal_value){
-                optimal_value = value;
-                optimal_index = i;
-            }
-        }
-        List<Mat> results = new ArrayList<>();
-        results.add(candidates.get(optimal_index));
-        return results;
-    }
-
-
-
-    private List<Mat> process_filter(List<Mat> mats, JSONObject descr, File image){
-        JSONArray filters = (JSONArray) descr.get("filters");
-        List<Mat> result = new ArrayList<>();
-
-        for (Object filter_obj : filters){
-            List<Mat> fil_result = null;
-            JSONObject filter = (JSONObject) filter_obj;
-            if (filter.has("type")){
-                switch (filter.getString("type")) {
-                    case "converter" -> fil_result = process_converter(mats, filter, image);
-                    case "mask" -> fil_result = process_mask(mats, filter, image);
-                    case "ellipse" -> fil_result = process_ellipse(mats, filter, image);
-                    case "optimisation" -> fil_result = process_optimisation(mats, filter, image);
-                }
-            }
-            else {
-                fil_result = process_filter(mats, filter, image);
-            }
-
-            if (filter.has("name")){
-                display_result(filter.getString("name"), fil_result);
-            }
-
-            if (filter.has("posix")){
-                store_result(image, filter.getString("posix"), fil_result);
-            }
-            if (descr.has("process")){
-                String processing = descr.getString("process");
-                if (!processing.equals("parallel")){
-                    mats = fil_result;
-                    result = fil_result;
-                }
-                else{
-                    for (Mat mat: fil_result){
-                        result.add(mat);
-                    }
-                }
-            }
-            else{
-                mats = fil_result;
-                result = fil_result;
-            }
-        }
-        return result;
-    }
-
-
     public void process_image(File image){
         filter_results.getChildren().clear();
         Mat mat = Imgcodecs.imread(image.getAbsolutePath());
@@ -351,7 +168,48 @@ public class App extends Application {
         System.out.println(image.getAbsolutePath());
         List<Mat> mats = new ArrayList<>();
         mats.add(mat);
-        process_filter(mats, new JSONObject(config.toString()) , image);
+        transformer.transform(mats, image);
+    }
+
+    private void process_image_with_excel(File image){
+        process_image(image);
+        Sheet sheet = workbook.getSheet("Measurements");
+        Row row = sheet.createRow(row_number);
+        row.createCell(0).setCellValue(image.getName());
+        transformer.store_result_in_excel(sheet, row_number);
+        row_number++;
+    }
+
+    private void setup_excel(){
+        workbook = new XSSFWorkbook();
+        Sheet sheet = workbook.createSheet("Measurements");
+        sheet.setColumnWidth(0, 5000);
+        sheet.setColumnWidth(1, 5000);
+        sheet.setColumnWidth(2, 5000);
+        sheet.setColumnWidth(3, 5000);
+        sheet.setColumnWidth(4, 5000);
+        Row row = sheet.createRow(0);
+        row.createCell(0).setCellValue("title");
+        // row.createCell(1).setCellValue("percentage [%]");
+        // row.createCell(2).setCellValue("area of gel [px^2]");
+        // row.createCell(3).setCellValue("area of impurities [px^2]");
+        // row.createCell(4).setCellValue("areas of impurities [px^2]");
+        row_number = 1;
+    }
+
+    private void save_excel(File directory){
+        String fileLocation = directory.getAbsolutePath() + "\\" + "d_measurements.xlsx";
+
+        FileOutputStream outputStream = null;
+        try {
+            outputStream = new FileOutputStream(fileLocation);
+            workbook.write(outputStream);
+            workbook.close();
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public void process_images(){
@@ -360,9 +218,12 @@ public class App extends Application {
             return;
         }
         for (Object path :paths){
+            setup_excel();
             File directory  = new File((String)path);
-            load_image_folder(directory, this::process_image);
+            load_image_folder(directory, this::process_image_with_excel);
+            save_excel(directory);
         }
+
     }
 
     @Override
